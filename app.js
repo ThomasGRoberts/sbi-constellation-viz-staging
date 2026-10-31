@@ -2130,6 +2130,10 @@ function setVisualizationMode(mode) {
 
     if (idleActive && previousMode === "3d") {
       // Keep the live camera pose for the automatic carousel entry animation.
+    } else if (previousMode === "2d") {
+      camera.fov = 38;
+      camera.zoom = 1;
+      setFullEarthView();
     } else if (!isHorizonView) {
       setFullEarthView();
     } else {

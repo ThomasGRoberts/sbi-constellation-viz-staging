@@ -606,7 +606,7 @@ body.mapIntro .siteMarker2d { box-shadow: none; }
 
 /* Satellite statuses read as a single list; the site entry is always last. */
 body:not(.mapMode2D) #legend3D {
-  grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 0; row-gap: 2px;
+  grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 0; row-gap: 5px;
   justify-content: start; align-content: start;
 }
 body:not(.mapMode2D) #legend3D .legendRow { justify-content: flex-start; }
