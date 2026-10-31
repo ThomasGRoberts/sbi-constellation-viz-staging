@@ -93,6 +93,7 @@ let detailedWorldFeatures = [];
 let worldGeoJson = null;
 
 let simulationSeconds = 0;
+let earthPresentationTimeSeconds = 0;
 let lastFrameTime = performance.now();
 let isPlaying = true;
 let playbackMultiplier = 1.0;
@@ -151,8 +152,7 @@ const CAROUSEL_TIMING = Object.freeze({
   siteDepartureMs: 700,
   fillDepartureMs: 600,
   outlineDepartureMs: 1100,
-  manualMovementGraceMs: 4500,
-  earthSpinRadPerSecond: .0016
+  manualMovementGraceMs: 4500
 });
 const SUPPLIED_CAROUSEL_VIEWS = {
   "north-korea": { yawRad: -0.51293686007167, tiltDeg: 1.7710937499999995,
@@ -2117,6 +2117,11 @@ function setVisualizationMode(mode) {
         !restoringPresentation && !idleActive) void runScenarioMapIntro();
   } else {
     attachCarouselInertialFrame();
+    if (previousMode === "2d") {
+      alignCarouselInertialFrame();
+      updateTrajectoryLines();
+      updateSatellitePositions();
+    }
     renderer.domElement.style.display = "block";
     if (mapCanvas) mapCanvas.style.display = "none";
     if (cameraControls) cameraControls.style.display = "flex";
@@ -2533,6 +2538,7 @@ function clearConstellation() {
   minElevationDeg = 0;
   scenarioUseJ2 = false;
   simulationSeconds = 0;
+  earthPresentationTimeSeconds = 0;
   isPlaying = true;
 
   updateCoverageLegendMax();
@@ -2617,8 +2623,7 @@ function updateSingleTrajectoryLine({ mesh, plane }) {
   const radius = plane.a_km * SCALE;
   const inclination = degToRad(plane.i_deg);
   const raan0 = degToRad(plane.raan_deg);
-  const raan = carouselInertialAttached ? raan0 :
-    raanAtTimeRad(raan0, plane.a_km, 0, inclination, simulationSeconds);
+  const raan = raanAtTimeRad(raan0, plane.a_km, 0, inclination, simulationSeconds);
   const raanCos = Math.cos(raan), raanSin = Math.sin(raan);
   const inclinationCos = Math.cos(inclination), inclinationSin = Math.sin(inclination);
   const earthAngle = carouselInertialAttached ? 0 : -EARTH_ROTATION_RATE_RAD_PER_SEC * simulationSeconds;
@@ -2650,14 +2655,27 @@ function updateSatellitePositions() {
   const earthCos = Math.cos(earthAngle), earthSin = Math.sin(earthAngle);
   for (let idx = 0; idx < satelliteOrbitCache.length; idx += 1) {
     const orbit = satelliteOrbitCache[idx];
-    const argument = orbit.argumentOfLatitude + orbit.meanMotion * simulationSeconds;
-    const raan = orbit.raan + orbit.raanRate * simulationSeconds;
-    const xOrb = orbit.radius * Math.cos(argument);
-    const yOrb = orbit.radius * Math.sin(argument);
+    const argument = orbit.argumentOfLatitude + orbit.rawMeanMotion * simulationSeconds;
+    const rawRaan = orbit.rawRaan + orbit.rawRaanRate * simulationSeconds;
+    const raan = orbit.displayRaan + orbit.displayRaanRate * simulationSeconds;
+    // Project the analytical position onto the assigned representative plane.
+    // This is the closest point on its displayed circular trajectory; the
+    // original row still drives all coverage and chart calculations.
+    const raanDifference = rawRaan - raan;
+    const deltaCos = Math.cos(raanDifference), deltaSin = Math.sin(raanDifference);
+    const argumentCos = Math.cos(argument), argumentSin = Math.sin(argument);
+    const alongNode = argumentCos * deltaCos -
+      argumentSin * orbit.rawInclinationCos * deltaSin;
+    const alongTrack = argumentCos * orbit.displayInclinationCos * deltaSin +
+      argumentSin * (orbit.rawInclinationCos * orbit.displayInclinationCos * deltaCos +
+        orbit.rawInclinationSin * orbit.displayInclinationSin);
+    const projectedLength = Math.hypot(alongNode, alongTrack) || 1;
+    const xOrb = orbit.radius * alongNode / projectedLength;
+    const yOrb = orbit.radius * alongTrack / projectedLength;
     const raanCos = Math.cos(raan), raanSin = Math.sin(raan);
-    const inertialX = xOrb * raanCos - yOrb * raanSin * orbit.inclinationCos;
-    const inertialY = xOrb * raanSin + yOrb * raanCos * orbit.inclinationCos;
-    const inertialZ = yOrb * orbit.inclinationSin;
+    const inertialX = xOrb * raanCos - yOrb * raanSin * orbit.displayInclinationCos;
+    const inertialY = xOrb * raanSin + yOrb * raanCos * orbit.displayInclinationCos;
+    const inertialZ = yOrb * orbit.displayInclinationSin;
     const offset = idx * 3;
     values[offset] = inertialX * earthCos - inertialY * earthSin;
     values[offset + 1] = inertialZ;
@@ -2705,7 +2723,8 @@ function updateSceneForTime(forceCoverageSample = false, recordCoverageSample = 
     deferMapDraw = false, updateDisplayPositions = true) {
   if (updateDisplayPositions) updateSatellitePositions();
   const now = performance.now();
-  if (!idleActive && !carouselInertialAttached && (forceCoverageSample || !isPlaying || now - lastTrajectoryUpdateAt > 900)) {
+  if (visualizationMode === "3d" && (scenarioUseJ2 || !carouselInertialAttached) &&
+      (forceCoverageSample || !isPlaying || now - lastTrajectoryUpdateAt > 180)) {
     updateTrajectoryLines();
     lastTrajectoryUpdateAt = now;
   }
@@ -2837,6 +2856,8 @@ function renderConstellation(rows, scenarioInfo = null) {
   planeModels = [];
 
   simulationSeconds = 0;
+  earthPresentationTimeSeconds = 0;
+  alignCarouselInertialFrame();
   isPlaying = true;
   updatePlaybackButton();
 
@@ -2860,15 +2881,21 @@ function renderConstellation(rows, scenarioInfo = null) {
     // Snap only the visible sprite to its representative plane. The row used by
     // coverage and chart calculations retains its original orbital elements.
     const displayPlane = row.assignedPlane;
-    const aKm = Number(displayPlane.a_km);
-    const inclination = degToRad(Number(displayPlane.i_deg));
+    const rawAKm = Number(row.a_km);
+    const rawInclination = degToRad(Number(row.i_deg));
+    const displayAKm = Number(displayPlane.a_km);
+    const displayInclination = degToRad(Number(displayPlane.i_deg));
     return {
-      radius: aKm * SCALE,
-      meanMotion: Math.sqrt(MU_EARTH_KM3_S2 / Math.pow(aKm, 3)),
-      inclinationCos: Math.cos(inclination),
-      inclinationSin: Math.sin(inclination),
-      raan: degToRad(Number(displayPlane.raan_deg)),
-      raanRate: 0,
+      radius: displayAKm * SCALE,
+      rawMeanMotion: Math.sqrt(MU_EARTH_KM3_S2 / Math.pow(rawAKm, 3)),
+      rawInclinationCos: Math.cos(rawInclination),
+      rawInclinationSin: Math.sin(rawInclination),
+      rawRaan: degToRad(Number(row.raan_deg)),
+      rawRaanRate: scenarioUseJ2 ? j2RaanRateRadPerSec(rawAKm, 0, rawInclination) : 0,
+      displayInclinationCos: Math.cos(displayInclination),
+      displayInclinationSin: Math.sin(displayInclination),
+      displayRaan: degToRad(Number(displayPlane.raan_deg)),
+      displayRaanRate: scenarioUseJ2 ? j2RaanRateRadPerSec(displayAKm, 0, displayInclination) : 0,
       argumentOfLatitude: degToRad(Number(row.arg_lat_deg || 0))
     };
   });
@@ -3491,6 +3518,10 @@ async function runGeographicIntro(returnToNormalView = false) {
   if (!active()) return;
   setGroupOpacityFactor(constellationGroup, 1);
   setCarouselSatelliteProgress(0);
+  alignCarouselInertialFrame();
+  updateTrajectoryLines();
+  updateSatellitePositions();
+  document.body.dataset.geographicTransitionStage = "orbit-reveal";
   await animateValue(GEOGRAPHIC_INTRO_TIMING.globeOrbitRevealMs, progress => {
     if (active()) setCarouselSatelliteProgress(progress);
   });
@@ -3678,6 +3709,7 @@ if (timelineSlider) {
     const targetSeconds = Number(timelineSlider.value) * SECONDS_PER_HOUR;
 
     simulationSeconds = targetSeconds;
+    advanceEarthPresentationToSimulationTime();
     updateSceneForTime(false, false, visualizationMode === "2d");
 
     restartCoverageHistoryAtTime(targetSeconds);
@@ -3881,6 +3913,30 @@ function applyCarouselCamera() {
 function alignCarouselInertialFrame() {
   presentationRoot.updateWorldMatrix(true, false);
   presentationRoot.getWorldQuaternion(carouselInertialRoot.quaternion);
+  // Reanchor after deliberate camera/globe reframing while preserving the
+  // Earth-fixed phase used by the raw coverage calculation at this instant.
+  carouselInertialRoot.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 1, 0), -EARTH_ROTATION_RATE_RAD_PER_SEC * simulationSeconds));
+  earthPresentationTimeSeconds = simulationSeconds;
+}
+
+function advanceEarthPresentationToSimulationTime() {
+  // Equal and opposite to rotateAnalyticalVectorToEarthFixed: active colors,
+  // launch sites, and the displayed constellation now share one timebase.
+  const elapsedSimulationSeconds = simulationSeconds - earthPresentationTimeSeconds;
+  earthPresentationTimeSeconds = simulationSeconds;
+  document.body.dataset.simulationSeconds = simulationSeconds.toFixed(3);
+  const stage = document.body.dataset.carouselStage;
+  const geographicStage = document.body.dataset.geographicTransitionStage;
+  const orientationTransition = (geographicIntroActive && geographicStage !== "orbit-reveal") ||
+    (Boolean(geographicStage) && geographicStage !== "orbit-reveal") ||
+    ["enter-camera", "exit-camera", "rotate"].includes(stage);
+  const carouselEarthCanSpin = !idleActive || ["reveal-satellites", "dwell",
+    "depart-satellites", "depart-sites", "depart-fill", "depart-outline"].includes(stage);
+  if (visualizationMode !== "3d" || !carouselInertialAttached ||
+      orientationTransition || !carouselEarthCanSpin || !elapsedSimulationSeconds) return;
+  presentationRoot.rotation.y += EARTH_ROTATION_RATE_RAD_PER_SEC * elapsedSimulationSeconds;
+  document.body.dataset.earthSpinYaw = presentationRoot.rotation.y.toFixed(6);
 }
 
 function attachCarouselInertialFrame() {
@@ -3929,6 +3985,7 @@ async function transitionToCarouselCamera(view, stillActive) {
     camera.zoom = startZoom + (source.zoom * view.zoom - startZoom) * progress;
     presentationRoot.rotation.y = startYaw + yawDelta * progress;
     applyEarthTilt(startTilt + (view.tiltDeg - startTilt) * progress);
+    alignCarouselInertialFrame();
     camera.setViewOffset(window.innerWidth, window.innerHeight,
       startOffsetX + (view.offsetX - startOffsetX) * progress,
       startOffsetY + (view.offsetY - startOffsetY) * progress,
@@ -3988,6 +4045,7 @@ async function returnFromCarouselCamera() {
     camera.zoom = startZoom + (1 - startZoom) * progress;
     presentationRoot.rotation.y = startYaw * (1 - progress);
     applyEarthTilt(startTilt * (1 - progress));
+    alignCarouselInertialFrame();
     camera.setViewOffset(window.innerWidth, window.innerHeight,
       startOffsetX + (endOffsetX - startOffsetX) * progress,
       startOffsetY * (1 - progress), window.innerWidth, window.innerHeight);
@@ -4198,6 +4256,9 @@ async function showNextIdleScenario(generation) {
   });
   if (!active()) return;
   setCarouselStage("reveal-satellites");
+  alignCarouselInertialFrame();
+  updateTrajectoryLines();
+  updateSatellitePositions();
   await animateValue(CAROUSEL_TIMING.satelliteRevealMs, progress => { if (active()) setCarouselSatelliteProgress(progress); });
   if (!active()) return;
   setCarouselStage("dwell");
@@ -4361,17 +4422,11 @@ function animate() {
     if (!mapProjectionMorphActive && now - lastSceneFrameAt >= analysisInterval) {
       updateSceneForTime(false, true, false, false);
       document.body.dataset.playbackSpeedFactor = currentPlaybackMultiplier.toFixed(3);
-      document.body.dataset.simulationSeconds = simulationSeconds.toFixed(3);
       lastSceneFrameAt = now;
     }
   }
 
-  if (visualizationMode === "3d" && carouselInertialAttached &&
-      !geographicIntroActive && !document.body.dataset.geographicTransitionStage &&
-      (!idleActive || ["reveal-satellites", "dwell"].includes(document.body.dataset.carouselStage))) {
-    presentationRoot.rotation.y += (idleActive ? CAROUSEL_TIMING.earthSpinRadPerSecond : .00035) * Math.max(0, dt);
-    document.body.dataset.earthSpinYaw = presentationRoot.rotation.y.toFixed(6);
-  }
+  advanceEarthPresentationToSimulationTime();
 
   controls.update();
   if (visualizationMode === "3d" && countrySelect.value === "north-korea" && !geographicIntroActive) updateGlobeSiteDetail();

@@ -14,4 +14,4 @@ Open <http://localhost:8877/>. The application loads JavaScript libraries from C
 
 ## Data
 
-This staging copy includes the CSV and JSON result files referenced by all 140 available Principal Runs. The chart and coverage calculations use the full simulation rows. Grouped orbital trajectories and their aligned satellite sprites are a 3D display approximation.
+This staging copy includes the CSV and JSON result files referenced by all 140 available Principal Runs. The chart and coverage calculations use the full simulation rows. Grouped orbital trajectories and their aligned satellite sprites are a 3D display approximation. When a run enables J2, the displayed trajectories precess at the analytical J2 rate. Satellite sprites are projected onto those trajectories, and Earth rotation follows simulation time.
