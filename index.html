@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Optimizing Space-Based Missile Defense</title>
   <link rel="stylesheet" href="style.css?v=staging-round-1" />
-  <link rel="stylesheet" href="control-panel.css?v=threat-follow-1" />
+  <link rel="stylesheet" href="control-panel.css?v=principal-refresh-1" />
 </head>
 
 <body>
@@ -47,8 +47,9 @@
         </details>
 
         <section class="panelSection principalResult" aria-labelledby="resultHeading">
-          <p class="statIntro">To defend against this threat, a constellation of boost-phase interceptors needs:</p>
+          <p id="principalResultIntro" class="statIntro">To defend against this threat, a constellation of boost-phase interceptors needs:</p>
           <div class="resultMain"><strong id="principalSatelliteStat" aria-live="polite">—</strong><span id="resultHeading">satellites</span><span class="resultPlaneLine">in <span id="principalPlaneStat" aria-live="polite">—</span> orbital planes</span></div>
+          <p id="principalResultStatus" class="principalResultStatus" hidden></p>
           <p id="panelError" class="panelError" role="alert" hidden></p>
         </section>
 
@@ -211,8 +212,8 @@
   }
   </script>
 
-  <script type="module" src="app.js?v=j2-phase-2"></script>
-  <script type="module" src="control-panel.js?v=threat-follow-1"></script>
+  <script type="module" src="app.js?v=principal-refresh-1"></script>
+  <script type="module" src="control-panel.js?v=principal-refresh-1"></script>
   <script type="module" src="glossary.js?v=staging-round-1"></script>
   <script type="module" src="project-flourish.js?v=18"></script>
 </body>

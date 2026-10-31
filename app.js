@@ -3019,7 +3019,8 @@ async function loadPrincipalRun(run) {
     if (!csvResponse.ok || !jsonResponse.ok) throw new Error(`Principal Run files unavailable: ${run.name}`);
     const [csvText, resultData] = await Promise.all([csvResponse.text(), jsonResponse.json()]);
     if (requestId !== principalLoadSequence) return;
-    if (resultData.result?.status !== "Optimal" || resultData.run_name !== run.name) {
+    if (!["Optimal", "Time limit"].includes(run.resultStatus) ||
+        resultData.result?.status !== run.resultStatus || resultData.run_name !== run.name) {
       throw new Error(`Principal Run metadata mismatch: ${run.name}`);
     }
     if (!(Number(resultData.sim?.horizon_s) > 0) ||

@@ -156,6 +156,8 @@
 .resultMain .resultPlaneLine { margin-top: 2px; color: #71777a; font-size: 11.5px; font-weight: 400; font-style: italic; }
 .panelError { margin: 8px 0 0; color: #8c4a32; font-size: 10px; }
 .panelError[hidden] { display: none; }
+.principalResultStatus { margin: 9px 0 0; color: #6b7073; font-size: 10px; line-height: 1.35; text-align: center; }
+.principalResultStatus[hidden] { display: none; }
 
 #ui #scenarioBackBtn { width: auto; height: 28px; gap: 5px; padding: 0 2px; color: #777; }
 #scenarioBackBtn span { font-size: 11px; white-space: nowrap; }

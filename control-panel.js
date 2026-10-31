@@ -21,6 +21,8 @@ const detectionOptions = document.getElementById("detectionOptions");
 const velocityOptions = document.getElementById("velocityOptions");
 const capacityOptions = document.getElementById("capacityOptions");
 const satelliteStat = document.getElementById("principalSatelliteStat");
+const resultIntro = document.getElementById("principalResultIntro");
+const resultStatus = document.getElementById("principalResultStatus");
 const planeStat = document.getElementById("principalPlaneStat");
 const resultMain = document.querySelector(".resultMain");
 const resultHeading = document.getElementById("resultHeading");
@@ -69,6 +71,7 @@ function preferredRegionRun(nextRegion) {
   const mismatches = run => preferredKeys.reduce((count, key) =>
     count + Number(run[key] !== PREFERRED_ADVANCED[key]), 0);
   return [...candidates].sort((a, b) =>
+    Number(a.resultStatus !== "Optimal") - Number(b.resultStatus !== "Optimal") ||
     mismatches(a) - mismatches(b) ||
     score(a, PREFERRED_ADVANCED) - score(b, PREFERRED_ADVANCED) ||
     a.name.localeCompare(b.name))[0];
@@ -102,7 +105,7 @@ function revealConstellationCount(name) {
   delete resultMain.dataset.state;
 }
 
-function renderChoices(container, values, selectedValue, unit, onChoose, availableValues = values) {
+function renderChoices(container, values, selectedValue, unit, onChoose) {
   container.style.gridTemplateColumns = `repeat(${values.length}, minmax(0, 1fr))`;
   const buttons = [];
   values.forEach(value => {
@@ -124,8 +127,6 @@ function renderChoices(container, values, selectedValue, unit, onChoose, availab
     button.append(choiceText);
     button.setAttribute("aria-label", `${value}${unitText ? ` ${unitText}` : ""}`);
     button.setAttribute("aria-pressed", String(value === selectedValue));
-    button.disabled = !availableValues.includes(value);
-    if (button.disabled) button.title = "Unavailable with the current settings";
     button.addEventListener("click", () => onChoose(value));
     buttons.push(button);
   });
@@ -137,10 +138,6 @@ function render() {
   const salvos = uniqueSorted(allRegionRuns.map(run => run.salvo));
   const selectedSalvo = selectedRun.salvo;
   const salvoRuns = runsFor(region, selectedSalvo);
-  const advancedKeys = ["detectionTime", "burnoutVelocity", "interceptorsPerSatellite"];
-  const availableFor = key => uniqueSorted(salvoRuns
-    .filter(run => advancedKeys.every(other => other === key || run[other] === selectedRun[other]))
-    .map(run => run[key]));
 
   cards.forEach(card => {
     const isSelected = card.dataset.region === region;
@@ -153,12 +150,21 @@ function render() {
   renderChoices(salvoOptions, salvos, selectedSalvo, "", changeSalvo);
 
   renderChoices(detectionOptions, uniqueSorted(salvoRuns.map(run => run.detectionTime)), selectedRun.detectionTime,
-    "s", value => changeAdvanced("detectionTime", value), availableFor("detectionTime"));
+    "s", value => changeAdvanced("detectionTime", value));
   renderChoices(velocityOptions, uniqueSorted(salvoRuns.map(run => run.burnoutVelocity)), selectedRun.burnoutVelocity,
-    "km/s", value => changeAdvanced("burnoutVelocity", value), availableFor("burnoutVelocity"));
+    "km/s", value => changeAdvanced("burnoutVelocity", value));
   renderChoices(capacityOptions, uniqueSorted(salvoRuns.map(run => run.interceptorsPerSatellite)), selectedRun.interceptorsPerSatellite,
-    "", value => changeAdvanced("interceptorsPerSatellite", value), availableFor("interceptorsPerSatellite"));
+    "", value => changeAdvanced("interceptorsPerSatellite", value));
 
+  const isOptimal = selectedRun.resultStatus === "Optimal";
+  resultIntro.textContent = isOptimal
+    ? "To defend against this threat, a constellation of boost-phase interceptors needs:"
+    : "A feasible boost-phase interceptor constellation for this threat uses:";
+  resultStatus.hidden = isOptimal;
+  if (!isOptimal) {
+    const gapPercent = 100 * Number(selectedRun.mipGapAchieved);
+    resultStatus.textContent = `Solver time limit · ${Number.isFinite(gapPercent) ? gapPercent.toFixed(1) : "unknown"}% optimality gap. Minimum not proven.`;
+  }
   showConfigurationCue();
   satelliteStat.dataset.runName = selectedRun.name;
   planeStat.title = "Orbital planes represented by the trajectories shown on the globe.";
@@ -188,11 +194,10 @@ function changeSalvo(requested) {
 
 function changeAdvanced(key, requested) {
   const previous = selectedRun;
-  const keys = ["detectionTime", "burnoutVelocity", "interceptorsPerSatellite"];
   const candidates = runsFor(region, selectedRun.salvo).filter(run =>
-    run[key] === requested && keys.every(other => other === key || run[other] === previous[other]));
+    run[key] === requested);
   if (!candidates.length) return;
-  selectedRun = candidates[0];
+  selectedRun = nearestRun(candidates, previous);
   render();
   publishSelectedRun();
 }
@@ -367,7 +372,7 @@ async function initialize() {
     const response = await fetch("principal-panel-data.json", { cache: "no-store" });
     if (!response.ok) throw new Error(`Principal run data returned ${response.status}`);
     data = await response.json();
-    if (!data.runs?.length) throw new Error("No optimal principal runs were found.");
+    if (!data.runs?.length) throw new Error("No feasible principal runs were found.");
     const requested = new URLSearchParams(location.search).get("scenario");
     chooseRegion(REGIONS[requested] ? requested : "north-korea");
     await loadMiniMaps();
