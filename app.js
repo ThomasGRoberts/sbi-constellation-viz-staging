@@ -3068,7 +3068,8 @@ async function loadPrincipalRun(run) {
     draw2DMap();
     setStatus(`Loaded Principal Run ${run.name}. ${rows.length} satellites, ${displayedPlaneCount} displayed planes.`);
     document.dispatchEvent(new CustomEvent("principal-panel:run-loaded", {
-      detail: { run, actualPlanes: actualPlaneCount, displayPlanes: displayedPlaneCount }
+      detail: { run, actualPlanes: actualPlaneCount, displayPlanes: displayedPlaneCount,
+        awaitingPopulation: geographicSwitch }
     }));
     if (geographicSwitch) {
       document.body.dataset.geographicTransitionStage = "rotate-globe";
@@ -3211,6 +3212,12 @@ function getFocusVector(radius = 1) {
   return latLonToVector3(focusLatDeg, focusLonDeg, radius);
 }
 
+function getPresentedFocusVector(radius = 1) {
+  presentationRoot.updateWorldMatrix(true, false);
+  const orientation = presentationRoot.getWorldQuaternion(new THREE.Quaternion());
+  return getFocusVector(radius).applyQuaternion(orientation);
+}
+
 function apply3DViewOffset() {
   const width = window.innerWidth;
   const height = window.innerHeight;
@@ -3248,7 +3255,7 @@ function clear3DViewOffset() {
 }
 
 function setFullEarthView() {
-  const focus = getFocusVector(1);
+  const focus = getPresentedFocusVector(1);
 
   // Slightly enlarge the initial globe and bias the framing upward so the
   // open visualization area has more visual presence beneath the controls.
@@ -3408,7 +3415,7 @@ function animateCameraToCurrentThreat(durationMs = 520, endDistance = 3.8) {
   const endTarget = new THREE.Vector3(0, -0.06, 0);
   const startOffset = camera.position.clone().sub(startTarget);
   const startDirection = startOffset.clone().normalize();
-  const endDirection = getFocusVector(1).normalize();
+  const endDirection = getPresentedFocusVector(1).normalize();
   const rotation = new THREE.Quaternion().setFromUnitVectors(startDirection, endDirection);
   const identity = new THREE.Quaternion();
   const startDistance = startOffset.length();
@@ -3432,7 +3439,7 @@ function animateCameraToCurrentThreat(durationMs = 520, endDistance = 3.8) {
 function countryIntroCameraPosition(region = countrySelect.value) {
   const features = worldFeatures.filter(feature =>
     countryMatches(feature.properties?.name || "", region));
-  if (!features.length) return getFocusVector(1.8);
+  if (!features.length) return getPresentedFocusVector(1.8);
   const [longitude, latitude] = geoCentroid({ type: "FeatureCollection", features });
   const center = latLonToVector3(latitude, longitude).normalize();
   let widestAngle = 0;
@@ -3450,7 +3457,9 @@ function countryIntroCameraPosition(region = countrySelect.value) {
   const fitDistance = Math.cos(widestAngle) + Math.sin(widestAngle) / Math.tan(framingAngle);
   const horizonDistance = 1 / Math.cos(Math.min(widestAngle + THREE.MathUtils.degToRad(3),
     THREE.MathUtils.degToRad(82)));
-  return center.multiplyScalar(Math.min(8, Math.max(1.8, fitDistance, horizonDistance)));
+  presentationRoot.updateWorldMatrix(true, false);
+  return center.applyQuaternion(presentationRoot.getWorldQuaternion(new THREE.Quaternion()))
+    .multiplyScalar(Math.min(8, Math.max(1.8, fitDistance, horizonDistance)));
 }
 
 async function runGeographicIntro(returnToNormalView = false) {
@@ -3464,7 +3473,7 @@ async function runGeographicIntro(returnToNormalView = false) {
   const startPosition = camera.position.clone();
   const startTarget = controls.target.clone();
   const startUp = camera.up.clone();
-  const endPosition = returnToNormalView ? getFocusVector(3.8) : startPosition.clone();
+  const endPosition = returnToNormalView ? getPresentedFocusVector(3.8) : startPosition.clone();
   const endTarget = returnToNormalView ? new THREE.Vector3(0, -0.06, 0) : startTarget.clone();
   const endUp = returnToNormalView ? new THREE.Vector3(0, 1, 0) : startUp.clone();
   setGroupOpacityFactor(constellationGroup, 0);
@@ -3535,6 +3544,9 @@ async function runGeographicIntro(returnToNormalView = false) {
   geographicIntroFade = 1;
   updateGlobeSiteDetail();
   delete document.body.dataset.geographicTransitionStage;
+  document.dispatchEvent(new CustomEvent("principal-panel:population-complete", {
+    detail: { name: activePrincipalRun?.name }
+  }));
 }
 
 function stopGeographicIntro() {
@@ -3551,6 +3563,9 @@ function stopGeographicIntro() {
   setGroupOpacityFactor(focusCountryFillGroup, 1);
   updateGlobeSiteDetail();
   delete document.body.dataset.geographicTransitionStage;
+  document.dispatchEvent(new CustomEvent("principal-panel:population-complete", {
+    detail: { name: activePrincipalRun?.name }
+  }));
 }
 
 function markThreatTransitionStage(audit, name) {
@@ -3939,7 +3954,25 @@ function advanceEarthPresentationToSimulationTime() {
     "depart-satellites", "depart-sites", "depart-fill", "depart-outline"].includes(stage);
   if (visualizationMode !== "3d" || !carouselInertialAttached ||
       orientationTransition || !carouselEarthCanSpin || !elapsedSimulationSeconds) return;
+  const populationReveal = geographicStage === "orbit-reveal";
+  const followThreat = !idleActive && (!geographicIntroActive || populationReveal) &&
+    (!geographicStage || populationReveal) &&
+    !restoringPresentation && !suppressScenarioCameraReframe;
+  let before = null;
+  if (followThreat) {
+    presentationRoot.updateWorldMatrix(true, false);
+    before = presentationRoot.getWorldQuaternion(new THREE.Quaternion());
+  }
   presentationRoot.rotation.y += EARTH_ROTATION_RATE_RAD_PER_SEC * elapsedSimulationSeconds;
+  if (before) {
+    presentationRoot.updateWorldMatrix(true, false);
+    const cameraTurn = presentationRoot.getWorldQuaternion(new THREE.Quaternion())
+      .multiply(before.invert());
+    camera.position.applyQuaternion(cameraTurn);
+    controls.target.applyQuaternion(cameraTurn);
+    camera.up.applyQuaternion(cameraTurn);
+    camera.lookAt(controls.target);
+  }
   document.body.dataset.earthSpinYaw = presentationRoot.rotation.y.toFixed(6);
 }
 

@@ -22,6 +22,8 @@ const velocityOptions = document.getElementById("velocityOptions");
 const capacityOptions = document.getElementById("capacityOptions");
 const satelliteStat = document.getElementById("principalSatelliteStat");
 const planeStat = document.getElementById("principalPlaneStat");
+const resultMain = document.querySelector(".resultMain");
+const resultHeading = document.getElementById("resultHeading");
 const advancedCompactSummary = document.getElementById("advancedCompactSummary");
 const panelError = document.getElementById("panelError");
 
@@ -81,6 +83,25 @@ function requestHeightSync() {
   requestAnimationFrame(() => document.dispatchEvent(new Event("principal-panel:resize")));
 }
 
+function showConfigurationCue() {
+  resultMain.dataset.state = "configuring";
+  resultMain.setAttribute("aria-busy", "true");
+  satelliteStat.textContent = "···";
+  satelliteStat.setAttribute("aria-label", "Configuring satellite constellation");
+  resultHeading.textContent = "configuring satellites";
+  planeStat.textContent = "—";
+}
+
+function revealConstellationCount(name) {
+  if (!selectedRun || name !== selectedRun.name) return;
+  resultMain.removeAttribute("aria-busy");
+  satelliteStat.textContent = selectedRun.satellites.toLocaleString();
+  planeStat.textContent = Number(displayedPlanesByRun.get(name) ?? selectedRun.displayPlanes).toLocaleString();
+  satelliteStat.removeAttribute("aria-label");
+  resultHeading.textContent = "satellites";
+  delete resultMain.dataset.state;
+}
+
 function renderChoices(container, values, selectedValue, unit, onChoose, availableValues = values) {
   container.style.gridTemplateColumns = `repeat(${values.length}, minmax(0, 1fr))`;
   const buttons = [];
@@ -138,8 +159,7 @@ function render() {
   renderChoices(capacityOptions, uniqueSorted(salvoRuns.map(run => run.interceptorsPerSatellite)), selectedRun.interceptorsPerSatellite,
     "", value => changeAdvanced("interceptorsPerSatellite", value), availableFor("interceptorsPerSatellite"));
 
-  satelliteStat.textContent = selectedRun.satellites.toLocaleString();
-  planeStat.textContent = Number(displayedPlanesByRun.get(selectedRun.name) ?? selectedRun.displayPlanes).toLocaleString();
+  showConfigurationCue();
   satelliteStat.dataset.runName = selectedRun.name;
   planeStat.title = "Orbital planes represented by the trajectories shown on the globe.";
   threatCompactSummary.textContent = `${selectedRun.salvo} ${selectedRun.salvo === 1 ? "missile" : "missiles"} from ${REGIONS[region].name}`;
@@ -324,14 +344,22 @@ document.addEventListener("principal-panel:request-run", event => {
 });
 document.addEventListener("principal-panel:run-load-error", event => {
   if (event.detail?.name !== selectedRun?.name) return;
+  satelliteStat.textContent = "—";
+  satelliteStat.removeAttribute("aria-label");
+  resultHeading.textContent = "satellites";
+  delete resultMain.dataset.state;
+  resultMain.removeAttribute("aria-busy");
   panelError.textContent = "This simulation could not be loaded.";
   panelError.hidden = false;
 });
 document.addEventListener("principal-panel:run-loaded", event => {
   displayedPlanesByRun.set(event.detail.run.name, Number(event.detail.displayPlanes));
   if (event.detail?.run?.name !== selectedRun?.name) return;
-  planeStat.textContent = Number(event.detail.displayPlanes).toLocaleString();
   planeStat.title = "Orbital planes represented by the trajectories shown on the globe.";
+  if (!event.detail.awaitingPopulation) revealConstellationCount(event.detail.run.name);
+});
+document.addEventListener("principal-panel:population-complete", event => {
+  revealConstellationCount(event.detail?.name);
 });
 
 async function initialize() {

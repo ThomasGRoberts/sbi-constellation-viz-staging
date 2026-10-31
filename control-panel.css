@@ -419,6 +419,19 @@ body.mapIntroSettling .siteMarker2d::before { border-color: #292929; }
 .threatCharacterization[open] .threatChevron::before,
 .advancedOptions[open] .advancedChevron::before { transform: rotate(90deg); }
 .resultMain #resultHeading { color: #000000; font-weight: 700; }
+.resultMain #principalSatelliteStat { display: flex; align-items: center; justify-content: center; min-height: 51px; }
+.resultMain[data-state="configuring"] #principalSatelliteStat {
+  color: var(--sbi-gold); font-size: 36px; letter-spacing: .16em;
+  animation: constellationConfigPulse 1.25s ease-in-out infinite;
+}
+.resultMain[data-state="configuring"] .resultPlaneLine { visibility: hidden; }
+@keyframes constellationConfigPulse {
+  0%, 100% { opacity: .4; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .resultMain[data-state="configuring"] #principalSatelliteStat { animation: none; }
+}
 .coverageChartSection { margin-top: 8px; padding: 0 2px 10px; border-top: 0; }
 .coverageChartSection #coverageChart { margin-top: 0; }
 
