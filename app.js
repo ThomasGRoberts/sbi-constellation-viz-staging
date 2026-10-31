@@ -111,6 +111,12 @@ let presentationTiltDeg = 0;
 let restoringPresentation = false;
 const SATELLITE_MARKER_SIZE_PX = 12;
 const CAROUSEL_SATELLITE_MARKER_SIZE_PX = 16;
+function markerSizeForCurrentRun(carousel = false) {
+  const count = satObjects.length;
+  if (count >= 15000) return carousel ? 10 : 8;
+  if (count >= 8000) return carousel ? 13 : 10;
+  return carousel ? CAROUSEL_SATELLITE_MARKER_SIZE_PX : SATELLITE_MARKER_SIZE_PX;
+}
 const CAROUSEL_STAMP_ANGULAR_RADIUS = .0033;
 const TRAJECTORY_COLOR = 0x777777;
 const CAROUSEL_TRAJECTORY_OPACITY = .14;
@@ -2434,46 +2440,62 @@ function addBoundaryTube(ring, isFocus) {
   }
 }
 
-function j2RaanRateRadPerSec(aKm, e, iRad) {
-  const J2 = 1.08262668e-3;
-  const earthRadiusKm = EARTH_RADIUS_KM;
+function orbitalRatesRadPerSec(aKm, e, iRad) {
   const n = Math.sqrt(MU_EARTH_KM3_S2 / Math.pow(aKm, 3));
-  const p = aKm * (1 - e * e);
+  if (!scenarioUseJ2) return { raan: 0, argumentOfLatitude: n };
 
-  return -1.5 * J2 * n * Math.pow(earthRadiusKm / p, 2) * Math.cos(iRad);
+  const J2 = 1.08262668e-3;
+  const p = aKm * (1 - e * e);
+  const j2Factor = J2 * Math.pow(EARTH_RADIUS_KM / p, 2);
+  const sinI = Math.sin(iRad);
+  const nBar = n * (1 + .75 * j2Factor * Math.sqrt(1 - e * e) * (2 - 3 * sinI * sinI));
+  const perigeeRate = .75 * j2Factor * nBar * (4 - 5 * sinI * sinI);
+  return {
+    raan: -1.5 * j2Factor * nBar * Math.cos(iRad),
+    argumentOfLatitude: nBar + perigeeRate
+  };
 }
 
 function raanAtTimeRad(raan0Rad, aKm, e, iRad, tSeconds) {
-  if (!scenarioUseJ2) {
-    return raan0Rad;
-  }
+  return raan0Rad + orbitalRatesRadPerSec(aKm, e, iRad).raan * tSeconds;
+}
 
-  return raan0Rad + j2RaanRateRadPerSec(aKm, e, iRad) * tSeconds;
+function propagationForRow(row) {
+  if (row.orbitalPropagation?.useJ2 === scenarioUseJ2) return row.orbitalPropagation;
+  const a = Number(row.a_km);
+  const inclination = degToRad(Number(row.i_deg));
+  const rates = orbitalRatesRadPerSec(a, Number(row.e) || 0, inclination);
+  row.orbitalPropagation = {
+    useJ2: scenarioUseJ2,
+    radius: a * SCALE,
+    inclinationCos: Math.cos(inclination),
+    inclinationSin: Math.sin(inclination),
+    raan: degToRad(Number(row.raan_deg)),
+    argumentOfLatitude: degToRad(Number(row.arg_lat_deg || 0)),
+    raanRate: rates.raan,
+    argumentRate: rates.argumentOfLatitude
+  };
+  return row.orbitalPropagation;
 }
 
 function analyticalOrbitalPosition(row, tSeconds) {
-  const a = Number(row.a_km);
-  const i = degToRad(Number(row.i_deg));
-  const raan0 = degToRad(Number(row.raan_deg));
-  const argLat0 = degToRad(Number(row.arg_lat_deg || 0));
+  const orbit = propagationForRow(row);
+  const raan = orbit.raan + orbit.raanRate * tSeconds;
+  const argLat = orbit.argumentOfLatitude + orbit.argumentRate * tSeconds;
 
-  const n = Math.sqrt(MU_EARTH_KM3_S2 / Math.pow(a, 3));
-  const raan = raanAtTimeRad(raan0, a, 0, i, tSeconds);
-  const argLat = argLat0 + n * tSeconds;
-
-  const xOrb = a * Math.cos(argLat);
-  const yOrb = a * Math.sin(argLat);
+  const xOrb = orbit.radius * Math.cos(argLat);
+  const yOrb = orbit.radius * Math.sin(argLat);
 
   const cosO = Math.cos(raan);
   const sinO = Math.sin(raan);
-  const cosI = Math.cos(i);
-  const sinI = Math.sin(i);
+  const cosI = orbit.inclinationCos;
+  const sinI = orbit.inclinationSin;
 
   const x = xOrb * cosO - yOrb * sinO * cosI;
   const y = xOrb * sinO + yOrb * cosO * cosI;
   const z = yOrb * sinI;
 
-  const inertialPosition = new THREE.Vector3(x * SCALE, z * SCALE, -y * SCALE);
+  const inertialPosition = new THREE.Vector3(x, z, -y);
 
   return rotateAnalyticalVectorToEarthFixed(inertialPosition, tSeconds);
 }
@@ -2885,22 +2907,21 @@ function renderConstellation(rows, scenarioInfo = null) {
     // Snap only the visible sprite to its representative plane. The row used by
     // coverage and chart calculations retains its original orbital elements.
     const displayPlane = row.assignedPlane;
-    const rawAKm = Number(row.a_km);
-    const rawInclination = degToRad(Number(row.i_deg));
+    const rawOrbit = propagationForRow(row);
     const displayAKm = Number(displayPlane.a_km);
     const displayInclination = degToRad(Number(displayPlane.i_deg));
     return {
       radius: displayAKm * SCALE,
-      rawMeanMotion: Math.sqrt(MU_EARTH_KM3_S2 / Math.pow(rawAKm, 3)),
-      rawInclinationCos: Math.cos(rawInclination),
-      rawInclinationSin: Math.sin(rawInclination),
-      rawRaan: degToRad(Number(row.raan_deg)),
-      rawRaanRate: scenarioUseJ2 ? j2RaanRateRadPerSec(rawAKm, 0, rawInclination) : 0,
+      rawMeanMotion: rawOrbit.argumentRate,
+      rawInclinationCos: rawOrbit.inclinationCos,
+      rawInclinationSin: rawOrbit.inclinationSin,
+      rawRaan: rawOrbit.raan,
+      rawRaanRate: rawOrbit.raanRate,
       displayInclinationCos: Math.cos(displayInclination),
       displayInclinationSin: Math.sin(displayInclination),
       displayRaan: degToRad(Number(displayPlane.raan_deg)),
-      displayRaanRate: scenarioUseJ2 ? j2RaanRateRadPerSec(displayAKm, 0, displayInclination) : 0,
-      argumentOfLatitude: degToRad(Number(row.arg_lat_deg || 0))
+      displayRaanRate: orbitalRatesRadPerSec(displayAKm, 0, displayInclination).raan,
+      argumentOfLatitude: rawOrbit.argumentOfLatitude
     };
   });
   if (!satelliteMarkerTexture) satelliteMarkerTexture = makeSatelliteSpriteTexture("#ffffff", "#111111", 14);
@@ -2916,7 +2937,7 @@ function renderConstellation(rows, scenarioInfo = null) {
   geometry.setIndex(indicesByPlane.flat());
   const material = new THREE.PointsMaterial({
     map: satelliteMarkerTexture,
-    size: idleActive ? CAROUSEL_SATELLITE_MARKER_SIZE_PX : SATELLITE_MARKER_SIZE_PX,
+    size: markerSizeForCurrentRun(idleActive),
     sizeAttenuation: false,
     vertexColors: true,
     transparent: true,
@@ -3922,7 +3943,7 @@ function applyCarouselCamera() {
   controls.enableDamping = false;
   applyCameraConfiguration(PREFERRED_HORIZON_CONFIG, false);
   if (satellitePointCloud) {
-    satellitePointCloud.material.size = CAROUSEL_SATELLITE_MARKER_SIZE_PX;
+    satellitePointCloud.material.size = markerSizeForCurrentRun(true);
     document.body.dataset.satelliteMarkerSizePx = String(satellitePointCloud.material.size);
   }
   siteMarkerGroup.visible = false;
@@ -4030,8 +4051,8 @@ async function transitionToCarouselCamera(view, stillActive) {
     camera.updateProjectionMatrix();
     camera.lookAt(controls.target);
     if (satellitePointCloud) {
-      satellitePointCloud.material.size = SATELLITE_MARKER_SIZE_PX +
-        (CAROUSEL_SATELLITE_MARKER_SIZE_PX - SATELLITE_MARKER_SIZE_PX) * progress;
+      satellitePointCloud.material.size = markerSizeForCurrentRun() +
+        (markerSizeForCurrentRun(true) - markerSizeForCurrentRun()) * progress;
       document.body.dataset.satelliteMarkerSizePx = satellitePointCloud.material.size.toFixed(2);
     }
     trajectoryObjects.forEach(({ mesh }) => {
@@ -4089,8 +4110,8 @@ async function returnFromCarouselCamera() {
     camera.updateProjectionMatrix();
     camera.lookAt(controls.target);
     if (satellitePointCloud) {
-      satellitePointCloud.material.size = CAROUSEL_SATELLITE_MARKER_SIZE_PX +
-        (SATELLITE_MARKER_SIZE_PX - CAROUSEL_SATELLITE_MARKER_SIZE_PX) * progress;
+      satellitePointCloud.material.size = markerSizeForCurrentRun(true) +
+        (markerSizeForCurrentRun() - markerSizeForCurrentRun(true)) * progress;
       document.body.dataset.satelliteMarkerSizePx = satellitePointCloud.material.size.toFixed(2);
     }
     setCarouselSatelliteProgress(startSatelliteProgress + (1 - startSatelliteProgress) * progress);
@@ -4423,7 +4444,6 @@ document.addEventListener("visibilitychange", () => {
 scheduleIdleMode();
 
 let lastSceneFrameAt = 0;
-let lastSatelliteFrameAt = 0;
 function animate() {
   requestAnimationFrame(animate);
 
@@ -4448,10 +4468,8 @@ function animate() {
 
     // Position buffers are cheap to update and must remain smooth. Coverage
     // metrics and chart samples are evaluated separately on their own cadence.
-    if (visualizationMode === "3d" &&
-        now - lastSatelliteFrameAt >= (satObjects.length > 20000 ? 33 : 0)) {
+    if (visualizationMode === "3d") {
       updateSatellitePositions();
-      lastSatelliteFrameAt = now;
     }
     const analysisInterval = visualizationMode === "2d"
       ? (satObjects.length > 3000 ? 420 : 200)
