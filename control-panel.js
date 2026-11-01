@@ -89,7 +89,12 @@ function requestHeightSync() {
 function showConfigurationCue() {
   resultMain.dataset.state = "configuring";
   resultMain.setAttribute("aria-busy", "true");
-  satelliteStat.textContent = "···";
+  satelliteStat.replaceChildren(...Array.from({ length: 3 }, () => {
+    const dot = document.createElement("span");
+    dot.className = "configSatelliteDot";
+    dot.setAttribute("aria-hidden", "true");
+    return dot;
+  }));
   satelliteStat.setAttribute("aria-label", "Configuring satellite constellation");
   resultHeading.textContent = "configuring satellites";
   planeStat.textContent = "—";

@@ -6,7 +6,8 @@ import { geoMollweide } from "d3-geo-projection";
 import { Delaunay } from "d3-delaunay";
 import {
   createSecretLegendActivation,
-  createThreatScenarioDetailController
+  createThreatScenarioDetailController,
+  loadThreatScenario
 } from "./scenario-detail.js?v=eci-refinement-1";
 
 const EARTH_RADIUS_KM = 6378.137;
@@ -58,6 +59,8 @@ let principalLoadSequence = 0;
 let principalLoadPromise = Promise.resolve();
 let activePrincipalRun = null;
 let playbackBeforePrincipalLoad = null;
+let configurationPending = false;
+let configurationRunName = null;
 let satObjects = [];
 let satellitePointCloud = null;
 let satelliteOrbitCache = [];
@@ -361,7 +364,8 @@ const threatScenarioDetail = createThreatScenarioDetailController({
   empty: document.getElementById("scenarioEmpty"),
   error: document.getElementById("scenarioError"),
   content: document.getElementById("scenarioDetailContent"),
-  getThreatRegion: () => countrySelect.value,
+  // The selected tile changes before its Principal Run finishes loading.
+  getThreatRegion: () => document.querySelector('.scenarioCard[data-selected="true"]')?.dataset.region || countrySelect.value,
   setThreatRegion: threatRegion => {
     document.dispatchEvent(new CustomEvent("principal-panel:request-region", { detail: { region: threatRegion } }));
     return principalLoadPromise;
@@ -379,11 +383,53 @@ document.addEventListener("principal-panel:resize", () => threatScenarioDetail.s
 document.addEventListener("principal-panel:run-selected", event => {
   const run = event.detail?.run;
   if (!run?.csvPath || !run?.jsonPath) return;
+  if (playbackBeforePrincipalLoad === null) playbackBeforePrincipalLoad = isPlaying;
+  configurationPending = true;
+  configurationRunName = run.name;
+  isPlaying = false;
+  playBtn.disabled = true;
+  if (timelineSlider) timelineSlider.disabled = true;
+  document.querySelector(".coverageChartSection")?.setAttribute("aria-busy", "true");
+  document.querySelector(".coverageChartSection")?.setAttribute("data-waiting", "true");
+  updatePlaybackButton();
   principalLoadPromise = loadPrincipalRun(run).catch(error => {
     console.error(error);
     setStatus(error.message);
     document.dispatchEvent(new CustomEvent("principal-panel:run-load-error", { detail: { name: run.name } }));
   });
+});
+
+function finishConfiguration(name) {
+  if (!configurationPending || name !== configurationRunName) return;
+  configurationPending = false;
+  configurationRunName = null;
+  playBtn.disabled = false;
+  if (timelineSlider) timelineSlider.disabled = false;
+  document.querySelector(".coverageChartSection")?.removeAttribute("aria-busy");
+  document.querySelector(".coverageChartSection")?.removeAttribute("data-waiting");
+  isPlaying = playbackBeforePrincipalLoad ?? true;
+  playbackBeforePrincipalLoad = null;
+  fillCoverageHistoryToTime(simulationSeconds);
+  updateSceneForTime(false, false);
+  updatePlaybackButton();
+}
+
+document.addEventListener("principal-panel:run-loaded", event => {
+  if (!event.detail?.awaitingPopulation) finishConfiguration(event.detail?.run?.name);
+});
+document.addEventListener("principal-panel:population-complete", event => {
+  finishConfiguration(event.detail?.name);
+});
+document.addEventListener("principal-panel:run-load-error", event => {
+  if (event.detail?.name !== configurationRunName) return;
+  configurationPending = false;
+  configurationRunName = null;
+  playBtn.disabled = false;
+  if (timelineSlider) timelineSlider.disabled = false;
+  document.querySelector(".coverageChartSection")?.removeAttribute("aria-busy");
+  document.querySelector(".coverageChartSection")?.removeAttribute("data-waiting");
+  playbackBeforePrincipalLoad = null;
+  updatePlaybackButton();
 });
 
 createSecretLegendActivation({
@@ -423,7 +469,8 @@ function updateCoverageLegendMax() {
 
 function formatTimeHHMM(seconds) {
   const loopSeconds = scenarioDurationSeconds;
-  const wrapped = ((seconds % loopSeconds) + loopSeconds) % loopSeconds;
+  const wrapped = Math.abs(seconds - loopSeconds) < .01
+    ? loopSeconds : ((seconds % loopSeconds) + loopSeconds) % loopSeconds;
   const totalMinutes = Math.floor(wrapped / 60);
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
@@ -436,17 +483,6 @@ function resetCoverageHistory() {
   coverageCurrentMetrics = null;
   lastCoverageSampleSeconds = null;
   document.body.dataset.chartSampleCount = "0";
-  drawCoverageChart();
-}
-
-function restartCoverageHistoryAtTime(timeSeconds) {
-  coverageHistory = [];
-  coverageCurrentMetrics = null;
-  lastCoverageSampleSeconds = null;
-
-  const sampleTime = Math.floor(timeSeconds / scenarioTimeStepSeconds) * scenarioTimeStepSeconds;
-  const metrics = sampleCoverageAtTime(sampleTime);
-  addCoverageSampleAtTime(sampleTime, metrics);
   drawCoverageChart();
 }
 
@@ -493,6 +529,44 @@ function updateSatellitePointColors(activeSatellites) {
     values[offset + 2] = active ? 0.02 : 0.68;
   }
   attribute.needsUpdate = true;
+}
+
+// Color the visible 3D dots against the visible Earth. Coverage and the chart
+// continue to use the ungrouped solver orbits and their analytical samples.
+function updateDisplayedSatelliteColors() {
+  if (!satellitePointCloud || !killRadiusKm || !targetPositions.length) return;
+  carouselInertialRoot.updateWorldMatrix(true, false);
+  presentationRoot.updateWorldMatrix(true, false);
+  const earthFromDisplay = presentationRoot.matrixWorld.clone().invert()
+    .multiply(carouselInertialRoot.matrixWorld);
+  const positions = satellitePointCloud.geometry.getAttribute("position").array;
+  const colors = satellitePointCloud.geometry.getAttribute("color");
+  const values = colors.array;
+  const killRadiusSq = (killRadiusKm / EARTH_RADIUS_KM) ** 2;
+  const minSinElevation = Math.sin(degToRad(minElevationDeg));
+  const point = new THREE.Vector3();
+  const targets = targetPositions.map(target => [target.x, target.y, target.z, target.lengthSq()]);
+  let activeCount = 0;
+  for (let index = 0; index < satObjects.length; index += 1) {
+    const offset = index * 3;
+    point.set(positions[offset], positions[offset + 1], positions[offset + 2])
+      .applyMatrix4(earthFromDisplay);
+    let active = false;
+    for (const [tx, ty, tz, targetLengthSq] of targets) {
+      const dx = point.x - tx, dy = point.y - ty, dz = point.z - tz;
+      const distanceSq = dx * dx + dy * dy + dz * dz;
+      if (distanceSq > killRadiusSq || distanceSq <= 0) continue;
+      const sinElevation = (dx * tx + dy * ty + dz * tz) /
+        Math.sqrt(distanceSq * targetLengthSq);
+      if (sinElevation >= minSinElevation) { active = true; break; }
+    }
+    if (active) activeCount += 1;
+    values[offset] = active ? 1 : .68;
+    values[offset + 1] = active ? .84 : .68;
+    values[offset + 2] = active ? .02 : .68;
+  }
+  colors.needsUpdate = true;
+  document.body.dataset.displayHighlightedSatellites = String(activeCount);
 }
 
 function computeCountsForPositions(positions, timeSeconds = simulationSeconds, positionResolver = analyticalOrbitalPosition) {
@@ -672,21 +746,11 @@ function fillCoverageHistoryToTime(targetSeconds) {
     coverageHistory = [];
     lastCoverageSampleSeconds = null;
 
-    const windowStart = Math.max(0, target - coverageWindowSeconds());
-    const firstSample =
-      Math.ceil(windowStart / scenarioTimeStepSeconds) *
-      scenarioTimeStepSeconds;
-
-    let sampleTime = Math.max(0, firstSample);
-
-    if (sampleTime > target + epsilon) {
-      sampleTime = target;
-    }
-
-    while (sampleTime <= target + epsilon) {
-      const metrics = sampleCoverageAtTime(sampleTime);
-      addCoverageSampleAtTime(sampleTime, metrics);
-      sampleTime += scenarioTimeStepSeconds;
+    const lastStep = Math.floor((target + epsilon) / scenarioTimeStepSeconds);
+    const firstStep = Math.max(0, lastStep - COVERAGE_HISTORY_LIMIT + 1);
+    for (let step = firstStep; step <= lastStep; step += 1) {
+      const sampleTime = step * scenarioTimeStepSeconds;
+      addCoverageSampleAtTime(sampleTime, sampleCoverageAtTime(sampleTime));
     }
 
     drawCoverageChart();
@@ -1261,16 +1325,16 @@ function drawMapBoundaries() {
     countryMatches(feature.properties?.name || "", selectedCountry)
   );
 
-  mapCtx.strokeStyle = "rgba(168,168,168,.62)";
-  mapCtx.lineWidth = 0.55;
+  mapCtx.strokeStyle = "rgba(85,85,85,.82)";
+  mapCtx.lineWidth = .7;
 
   mapCtx.beginPath();
   mapPath(worldGeoJson);
   mapCtx.stroke();
 
   if (focusFeatures.length > 0) {
-    mapCtx.strokeStyle = "#777777";
-    mapCtx.lineWidth = 1.25;
+    mapCtx.strokeStyle = "#404040";
+    mapCtx.lineWidth = 1.4;
 
     focusFeatures.forEach(feature => {
       mapCtx.beginPath();
@@ -1384,7 +1448,12 @@ function stopRegionalMapIntro() {
   mapSiteLayer.style.opacity = "1";
   mapSiteLayer.style.removeProperty("--map-site-tone-color");
   mapSiteLayer.style.removeProperty("--map-site-pulse-duration");
-  [...mapSiteLayer.children].forEach(marker => { marker.style.opacity = ""; marker.style.pointerEvents = ""; });
+  [...mapSiteLayer.children].forEach(marker => {
+    marker.style.opacity = "";
+    marker.style.pointerEvents = "";
+    marker.dataset.darkBlip = "true";
+    window.setTimeout(() => { delete marker.dataset.darkBlip; }, SITE_PULSE_TIMING.darkMs);
+  });
 }
 
 function drawRegionalIntroOutline(outlineProgress, fillProgress = 0) {
@@ -1436,6 +1505,7 @@ async function runScenarioMapIntro() {
   regionalIntroActive = true;
   document.body.classList.add("mapIntro");
   document.body.classList.remove("mapIntroSettling");
+  [...mapSiteLayer.children].forEach(marker => { delete marker.dataset.darkBlip; });
   mapCanvas.style.opacity = "0";
   mapIntroCanvas.style.opacity = "1";
   mapIntroCanvas.style.display = "block";
@@ -1516,8 +1586,8 @@ function drawBare2DMap() {
     mapCtx.stroke();
   }
   mapCtx.beginPath(); path(worldGeoJson);
-  mapCtx.strokeStyle = "#777777";
-  mapCtx.lineWidth = .7;
+  mapCtx.strokeStyle = "#555555";
+  mapCtx.lineWidth = .8;
   mapCtx.stroke();
   mapCtx.restore();
 }
@@ -1567,16 +1637,43 @@ function rebuildGlobeSiteMarkers() {
     pulse.frustumCulled = false;
     siteMarkerGroup.add(pulse);
     globeSiteEntries.push({ normal, tangentA, tangentB, dot: core, ring: pulse,
-      revealedAtMs: performance.now() - index * 180 });
+      revealedAtMs: performance.now() - index * 180, darkPulseStartedAtMs: null });
   });
   updateGlobeSiteDetail();
+}
+
+async function refreshLaunchSiteNamesFromSheet(region, requestId) {
+  try {
+    const scenario = await loadThreatScenario(region);
+    if (requestId !== principalLoadSequence || activePrincipalRun?.region !== region) return;
+    for (const target of targetLatLon) {
+      const location = scenario.locations.find(site =>
+        Math.abs(Number(site.latitude) - target.lat) < .025 &&
+        Math.abs(Number(site.longitude) - target.lon) < .025);
+      if (location?.title) target.name = location.title.trim();
+    }
+    globeSiteEntries.forEach((entry, index) => {
+      entry.dot.userData.siteName = targetLatLon[index]?.name;
+    });
+    carouselSiteEntries.forEach((entry, index) => {
+      entry.dot.userData.siteName = targetLatLon[index]?.name;
+    });
+    hideSiteTooltip();
+    document.body.dataset.launchSiteNames = targetLatLon.map(target => target.name).join("|");
+    if (visualizationMode === "2d") drawThreatSiteMarkers();
+  } catch (error) {
+    console.warn("Live launch-site names could not be loaded; using result names.", error);
+  }
 }
 
 function updateGlobeSiteDetail() {
   document.body.dataset.geographicIntroSites = String(geographicIntroActive ? geographicIntroSiteCount : 0);
   globeSiteEntries.forEach((entry, index) => {
     const visible = launchSitesActivated && (!geographicIntroActive || index < geographicIntroSiteCount);
-    if (visible && entry.revealedAtMs === null) entry.revealedAtMs = performance.now();
+    if (visible && entry.revealedAtMs === null) {
+      entry.revealedAtMs = performance.now();
+      entry.darkPulseStartedAtMs = null;
+    }
     entry.dot.visible = visible;
     entry.ring.visible = visible;
   });
@@ -1723,10 +1820,12 @@ function updateGlobeSiteEffects(now) {
   const reducedMotion = prefersReducedMotion();
   globeSiteEntries.forEach(entry => {
     if (!entry.dot.visible) return;
-    const elapsed = Math.max(0, now - (entry.revealedAtMs ?? now));
+    const pulseStartedAt = goldFraction > 0
+      ? entry.revealedAtMs : (entry.darkPulseStartedAtMs ?? entry.revealedAtMs);
+    const elapsed = Math.max(0, now - (pulseStartedAt ?? now));
     const pulseDuration = SITE_PULSE_TIMING.darkMs +
       (SITE_PULSE_TIMING.goldMs - SITE_PULSE_TIMING.darkMs) * goldFraction;
-    const cycle = reducedMotion ? .45 : (elapsed % pulseDuration) / pulseDuration;
+    const cycle = reducedMotion ? 1 : Math.min(1, elapsed / pulseDuration);
     const eased = 1 - (1 - cycle) ** 2;
     entry.dot.material.color.copy(globeSiteDark).lerp(globeSiteGold, goldFraction);
     const dotRadiusPx = (countrySelect.value === "north-korea" ? 2.8 : 3.5) + 2.2 * goldFraction;
@@ -1738,7 +1837,7 @@ function updateGlobeSiteEffects(now) {
     writeSurfacePulseRing(entry, surfaceAngularRadiusForPixels(entry,
       dotRadiusPx * (1.5 + (2.9 + 1.1 * goldFraction) * eased)));
     entry.ring.material.opacity = (.48 + .25 * goldFraction) * (1 - cycle) ** 2;
-    entry.ring.visible = true;
+    entry.ring.visible = cycle < 1;
   });
 }
 
@@ -1770,17 +1869,17 @@ function updateCarouselSiteEffects(now) {
       return;
     }
     if (settled) {
-      const cycle = ((now - carouselSiteSettledAtMs + index * 90) % SITE_PULSE_TIMING.darkMs) /
-        SITE_PULSE_TIMING.darkMs;
+      const cycle = Math.min(1, Math.max(0,
+        (now - carouselSiteSettledAtMs - index * 90) / SITE_PULSE_TIMING.darkMs));
       writeSurfacePulseRing(entry, surfaceAngularRadiusForPixels(entry, 6.2 + 12 * cycle));
       entry.ring.material.opacity = .5 * (1 - cycle) ** 2 * carouselSiteOpacity;
-      entry.ring.visible = true;
+      entry.ring.visible = cycle < 1;
     } else {
-      const progress = (local % SITE_PULSE_TIMING.goldMs) / SITE_PULSE_TIMING.goldMs;
+      const progress = Math.min(1, local / SITE_PULSE_TIMING.goldMs);
       const eased = 1 - (1 - progress) ** 3;
       writeSurfacePulseRing(entry, surfaceAngularRadiusForPixels(entry, 8 + 23 * eased));
       entry.ring.material.opacity = .74 * (1 - progress ** 4) * carouselSiteOpacity;
-      entry.ring.visible = true;
+      entry.ring.visible = progress < 1;
     }
   });
 }
@@ -2313,7 +2412,7 @@ function makeFallbackEarth() {
 }
 
 async function loadWorldBoundaries() {
-  const standardUrl = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
+  const standardUrl = "assets/countries-110m.json";
   const standardResponse = await fetch(standardUrl);
   const standardTopology = await standardResponse.json();
   const countries = topojson.feature(standardTopology, standardTopology.objects.countries);
@@ -2327,13 +2426,14 @@ async function loadWorldBoundaries() {
   threatScenarioDetail.refreshMap();
 
   try {
-    const detailedUrl = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json";
+    const detailedUrl = "assets/countries-50m.json";
     const detailedResponse = await fetch(detailedUrl);
     const detailedTopology = await detailedResponse.json();
     detailedWorldFeatures = topojson.feature(
       detailedTopology,
       detailedTopology.objects.countries
     ).features;
+    redrawCountryBoundaries();
     threatScenarioDetail.refreshMap();
   } catch (detailError) {
     console.warn("Detailed inset boundaries could not be loaded; using standard boundaries.", detailError);
@@ -2349,7 +2449,8 @@ function redrawCountryBoundaries() {
   focusCountryFillTexture = null;
 
   const selectedCountry = countrySelect.value;
-  const focusFeatures = worldFeatures.filter(feature =>
+  const globeFeatures = detailedWorldFeatures.length ? detailedWorldFeatures : worldFeatures;
+  const focusFeatures = globeFeatures.filter(feature =>
     countryMatches(feature.properties?.name || "", selectedCountry));
 
   if (focusFeatures.length) {
@@ -2377,7 +2478,7 @@ function redrawCountryBoundaries() {
     focusCountryFillGroup.add(fill);
   }
 
-  worldFeatures.forEach(feature => {
+  globeFeatures.forEach(feature => {
     const name = feature.properties?.name || "";
     const isFocus = countryMatches(name, selectedCountry);
     addCountryBoundary(feature.geometry, false);
@@ -2408,35 +2509,43 @@ function addCountryBoundary(geometry, isFocus) {
 function addBoundaryTube(ring, isFocus) {
   if (!ring || ring.length < 3) return;
 
-  const radius = isFocus ? 1.0012 : 1.001;
-  const points = ring.map(([lon, lat]) => latLonToVector3(lat, lon, radius));
-
-  const curve = new THREE.CatmullRomCurve3(points, true);
-  const tubeRadius = isFocus ? FOCUS_LINE_RADIUS : COUNTRY_LINE_RADIUS;
-
-  const geom = new THREE.TubeGeometry(
-    curve,
-    Math.max(24, points.length * 2),
-    tubeRadius,
-    isFocus ? 8 : 5,
-    true
-  );
-
-  const mat = new THREE.MeshBasicMaterial({
-    color: isFocus ? 0x777777 : 0xa8a8a8,
+  const radius = isFocus ? 1.002 : 1.0017;
+  const positions = [];
+  // Follow the source vertices without spline overshoot. Long source jumps
+  // are discontinuities, not borders to loop across the globe.
+  for (let index = 1; index < ring.length; index += 1) {
+    const from = latLonToVector3(ring[index - 1][1], ring[index - 1][0]);
+    const to = latLonToVector3(ring[index][1], ring[index][0]);
+    const angle = from.angleTo(to);
+    if (angle > THREE.MathUtils.degToRad(25)) continue;
+    const steps = Math.max(1, Math.ceil(angle / THREE.MathUtils.degToRad(1)));
+    let last = from;
+    for (let step = 1; step <= steps; step += 1) {
+      const next = from.clone().lerp(to, step / steps).normalize();
+      positions.push(last.x * radius, last.y * radius, last.z * radius,
+        next.x * radius, next.y * radius, next.z * radius);
+      last = next;
+    }
+  }
+  if (!positions.length) return;
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geom.setIndex(Array.from({ length: positions.length / 3 }, (_, index) => index));
+  const mat = new THREE.LineBasicMaterial({
+    color: isFocus ? 0x454545 : 0x626262,
     transparent: true,
-    opacity: isFocus ? 1.0 : 0.62,
+    opacity: isFocus ? 1 : .85,
     depthTest: true,
-    depthWrite: true
+    depthWrite: false
   });
 
-  const tube = new THREE.Mesh(geom, mat);
-  tube.renderOrder = isFocus ? 8 : 3;
+  const line = new THREE.LineSegments(geom, mat);
+  line.renderOrder = isFocus ? 8 : 3;
 
   if (isFocus) {
-    focusCountryLineGroup.add(tube);
+    focusCountryLineGroup.add(line);
   } else {
-    countryLineGroup.add(tube);
+    countryLineGroup.add(line);
   }
 }
 
@@ -2713,7 +2822,8 @@ function updateSatellitePositions() {
 function updateCoverageColors(forceCoverageSample = false, recordCoverageSample = true, deferMapDraw = false) {
   // Coverage, chart history, and 2D colors all use the full Principal Run.
   // Grouping only controls how many representative 3D lines are drawn.
-  const metrics = computeCoverageMetrics(true, simulationSeconds, analyticalOrbitalPosition);
+  const metrics = computeCoverageMetrics(visualizationMode === "2d", simulationSeconds,
+    analyticalOrbitalPosition);
 
   coverageCurrentMetrics = metrics;
 
@@ -2791,8 +2901,8 @@ async function loadScenarioJson(csvPath, preloadedData = null) {
 
   const data = preloadedData || await response.json();
 
-  scenarioDurationSeconds =
-    Number(data.sim?.horizon_s) || 24 * SECONDS_PER_HOUR;
+  scenarioDurationSeconds = Math.min(12 * SECONDS_PER_HOUR,
+    Number(data.sim?.horizon_s) || 12 * SECONDS_PER_HOUR);
 
   scenarioTimeStepSeconds =
     Number(data.sim?.dt_s) || 120;
@@ -2884,7 +2994,7 @@ function renderConstellation(rows, scenarioInfo = null) {
   simulationSeconds = 0;
   earthPresentationTimeSeconds = 0;
   alignCarouselInertialFrame();
-  isPlaying = true;
+  isPlaying = !configurationPending;
   updatePlaybackButton();
 
   if (timelineSlider) timelineSlider.value = 0;
@@ -2963,7 +3073,7 @@ function renderConstellation(rows, scenarioInfo = null) {
     setGroupOpacityFactor(constellationGroup, 0);
     setGroupOpacityFactor(trajectoryGroup, 0);
   }
-  fillCoverageHistoryToTime(0);
+  if (!configurationPending) fillCoverageHistoryToTime(0);
   updateSceneForTime(false, false);
 
   setStatus(
@@ -3081,6 +3191,7 @@ async function loadPrincipalRun(run) {
       throw new Error(`Rendered orbital-plane count mismatch: ${run.name}`);
     }
     activePrincipalRun = run;
+    void refreshLaunchSiteNamesFromSheet(run.region, requestId);
     if (geographicSwitch) setPlaneAnimationOrder(`geographic-arrival:${run.region}`);
     if (regionChanged && visualizationMode === "2d" &&
         !restoringPresentation) mapCanvas.style.opacity = "0";
@@ -3115,7 +3226,8 @@ async function loadPrincipalRun(run) {
     else updateGlobeSiteDetail();
     hasCompletedInitialRun = true;
   } finally {
-    if (requestId === principalLoadSequence) {
+    if (requestId === principalLoadSequence && !configurationPending &&
+        playbackBeforePrincipalLoad !== null) {
       isPlaying = playbackBeforePrincipalLoad;
       playbackBeforePrincipalLoad = null;
       updatePlaybackButton();
@@ -3564,6 +3676,7 @@ async function runGeographicIntro(returnToNormalView = false) {
   geographicIntroActive = false;
   geographicIntroSiteCount = 0;
   geographicIntroFade = 1;
+  globeSiteEntries.forEach(entry => { entry.darkPulseStartedAtMs = performance.now(); });
   updateGlobeSiteDetail();
   delete document.body.dataset.geographicTransitionStage;
   document.dispatchEvent(new CustomEvent("principal-panel:population-complete", {
@@ -3577,6 +3690,7 @@ function stopGeographicIntro() {
   geographicIntroActive = false;
   geographicIntroSiteCount = 0;
   geographicIntroFade = 1;
+  globeSiteEntries.forEach(entry => { entry.darkPulseStartedAtMs = performance.now(); });
   setGroupOpacityFactor(constellationGroup, 1);
   setGroupOpacityFactor(trajectoryGroup, 1);
   setCarouselSatelliteProgress(1);
@@ -3753,7 +3867,7 @@ if (timelineSlider) {
     advanceEarthPresentationToSimulationTime();
     updateSceneForTime(false, false, visualizationMode === "2d");
 
-    restartCoverageHistoryAtTime(targetSeconds);
+    fillCoverageHistoryToTime(targetSeconds);
   });
 }
 
@@ -4071,7 +4185,7 @@ async function returnFromCarouselCamera() {
   const startPosition = camera.position.clone();
   const startTarget = controls.target.clone();
   const startUp = camera.up.clone();
-  const endPosition = getFocusVector(3.8);
+  const endPosition = getPresentedFocusVector(3.8);
   const endTarget = new THREE.Vector3(0, -0.06, 0);
   const endUp = new THREE.Vector3(0, 1, 0);
   const startFov = camera.fov, startZoom = camera.zoom;
@@ -4079,8 +4193,6 @@ async function returnFromCarouselCamera() {
   const startOffsetY = camera.view?.enabled ? camera.view.offsetY : 0;
   const uiPanel = document.getElementById("ui");
   const endOffsetX = -Math.max(0, uiPanel.offsetLeft + uiPanel.offsetWidth) / 2;
-  const startYaw = presentationRoot.rotation.y;
-  const startTilt = presentationTiltDeg;
   const startPlaybackMultiplier = currentPlaybackMultiplier;
   const initialSatellites = Math.min(satObjects.length,
     satellitePointCloud?.geometry.drawRange.count ?? satObjects.length);
@@ -4102,9 +4214,6 @@ async function returnFromCarouselCamera() {
     camera.up.copy(startUp).lerp(endUp, progress).normalize();
     camera.fov = startFov + (38 - startFov) * progress;
     camera.zoom = startZoom + (1 - startZoom) * progress;
-    presentationRoot.rotation.y = startYaw * (1 - progress);
-    applyEarthTilt(startTilt * (1 - progress));
-    alignCarouselInertialFrame();
     camera.setViewOffset(window.innerWidth, window.innerHeight,
       startOffsetX + (endOffsetX - startOffsetX) * progress,
       startOffsetY * (1 - progress), window.innerWidth, window.innerHeight);
@@ -4121,8 +4230,8 @@ async function returnFromCarouselCamera() {
     setGroupOpacityFactor(focusCountryFillGroup, fillStart + (1 - fillStart) * progress);
     setGroupOpacityFactor(constellationGroup, constellationOpacityStart + (1 - constellationOpacityStart) * progress);
     trajectoryObjects.forEach(({ mesh }) => {
-      mesh.material.opacity *= (CAROUSEL_TRAJECTORY_OPACITY +
-        (.24 - CAROUSEL_TRAJECTORY_OPACITY) * progress) / .24;
+      mesh.material.opacity = (mesh.material.userData.scenarioBaseOpacity ?? .24) *
+        (CAROUSEL_TRAJECTORY_OPACITY + (.24 - CAROUSEL_TRAJECTORY_OPACITY) * progress) / .24;
     });
   });
   isHorizonView = false;
@@ -4162,9 +4271,9 @@ async function rotateCarouselToCurrentRegion(durationMs, stillActive) {
 function setCarouselOutlineProgress(progress) {
   const meshes = focusCountryLineGroup.children.filter(child => child.geometry);
   const counts = meshes.map(mesh => mesh.geometry.index?.count ?? mesh.geometry.getAttribute("position")?.count ?? 0);
-  let remaining = Math.floor(counts.reduce((sum, count) => sum + count, 0) * Math.max(0, Math.min(1, progress)) / 3) * 3;
+  let remaining = Math.floor(counts.reduce((sum, count) => sum + count, 0) * Math.max(0, Math.min(1, progress)) / 2) * 2;
   meshes.forEach((mesh, index) => {
-    const count = Math.max(0, Math.min(counts[index], remaining));
+    const count = Math.floor(Math.max(0, Math.min(counts[index], remaining)) / 2) * 2;
     mesh.geometry.setDrawRange(0, count);
     remaining -= count;
   });
@@ -4381,6 +4490,7 @@ async function enterIdleMode(manual = false) {
 async function exitIdleMode() {
   if (!idleActive) return;
   idleActive = false;
+  isPlaying = false;
   manualIdleGraceUntil = 0;
   idleGeneration += 1;
   window.clearTimeout(idleCarouselTimer);
@@ -4391,8 +4501,10 @@ async function exitIdleMode() {
   suppressScenarioCameraReframe = false;
   idleSession = null;
   if (prior?.viewMode === "3d") {
-    isPlaying = true;
+    // Keep the Earth and constellation fixed while only the camera returns.
+    isPlaying = false;
     siteMarkerGroup.visible = launchSitesActivated;
+    globeSiteEntries.forEach(entry => { entry.darkPulseStartedAtMs = performance.now(); });
     carouselPulseStartMs = null;
     updateCarouselSiteEffects(performance.now());
     await returnFromCarouselCamera();
@@ -4411,7 +4523,7 @@ async function exitIdleMode() {
   document.body.classList.remove("idleMode");
   document.getElementById("ui").removeAttribute("aria-hidden");
   restoringPresentation = false;
-  isPlaying = true;
+  isPlaying = prior?.playing ?? true;
   currentPlaybackMultiplier = playbackMultiplier;
   updatePlaybackButton();
   updateSceneForTime(false, false);
@@ -4483,6 +4595,8 @@ function animate() {
   }
 
   advanceEarthPresentationToSimulationTime();
+
+  if (visualizationMode === "3d") updateDisplayedSatelliteColors();
 
   controls.update();
   if (visualizationMode === "3d" && countrySelect.value === "north-korea" && !geographicIntroActive) updateGlobeSiteDetail();

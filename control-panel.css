@@ -644,3 +644,75 @@ body.mapIntro.mapIntroSettling .siteMarker2d::before {
   0% { transform: scale(.8); opacity: .6; }
   75%, 100% { transform: scale(2.4); opacity: 0; }
 }
+
+/* Comment log rows 10, 12, 13, 15, 16, 18, 19. */
+body.mapIntro .siteMarker2d::before {
+  animation-iteration-count: 1;
+  animation-fill-mode: forwards;
+}
+.siteMarker2d[data-dark-blip="true"]::before {
+  content: "";
+  border-color: #4a4a4a;
+  animation: siteMarkerPulse var(--site-pulse-dark-duration, 2600ms) ease-out 1 forwards;
+}
+.legendSiteDot::after { animation-iteration-count: 1; animation-fill-mode: forwards; }
+.scenarioMapLocator.is-selected { animation: none; opacity: 0; }
+.scenarioMapMarker.is-selected .scenarioMapMarkerPulse {
+  animation: scenarioSelectedSiteBlip 1.05s ease-out 1 both;
+}
+@keyframes scenarioSelectedSiteBlip {
+  0% { opacity: .75; transform: scale(.55); }
+  100% { opacity: 0; transform: scale(2); }
+}
+.scenarioCardInfo {
+  position: absolute; top: 6px; right: 7px; z-index: 1;
+  display: grid; place-items: center; width: 16px; height: 16px;
+  border: 1px solid currentColor; border-radius: 50%;
+  color: #716c5e; background: rgba(255,255,255,.82);
+  font-size: 11px; font-weight: 700; font-style: normal; line-height: 1;
+  opacity: 0; transform: scale(.85); pointer-events: none;
+  transition: opacity .18s ease, transform .2s ease, box-shadow .2s ease;
+}
+.scenarioCard[data-selected="true"] .scenarioCardInfo { opacity: .8; transform: scale(1); }
+.scenarioCard[data-selected="true"]:hover .scenarioCardInfo,
+.scenarioCard[data-selected="true"]:focus-within .scenarioCardInfo {
+  opacity: 1; transform: scale(1.15); box-shadow: 0 0 0 3px rgba(184,139,19,.17);
+}
+.advancedOptions:not([open]) { height: auto; min-height: 53px; }
+.advancedOptions:not([open]) > summary { height: auto; min-height: 37px; grid-template-rows: 18px auto; row-gap: 3px; }
+.advancedOptions:not([open]) .advancedCompactSummary {
+  height: auto; overflow: visible; text-overflow: clip; white-space: normal;
+  line-height: 1.3;
+}
+.resultMain[data-state="configuring"] #principalSatelliteStat {
+  position: relative; width: 78px; overflow: hidden;
+  animation: none; letter-spacing: 0;
+}
+.configSatelliteDot {
+  position: absolute; top: calc(50% - 5px); left: calc(50% - 5px);
+  display: block; width: 10px; height: 10px; border-radius: 50%;
+  background: #a9a9a9; animation: configSatellitePass 2.4s linear infinite;
+}
+.configSatelliteDot:nth-child(2) { animation-delay: -.8s; }
+.configSatelliteDot:nth-child(3) { animation-delay: -1.6s; }
+@keyframes configSatellitePass {
+  0% { background: #aaa; opacity: 0; transform: translateX(-34px) scale(.8); }
+  15%, 38% { background: #aaa; opacity: .7; }
+  50% { background: #eaaa00; opacity: 1; transform: translateX(0) scale(1.25); }
+  62%, 85% { background: #aaa; opacity: .7; }
+  100% { background: #aaa; opacity: 0; transform: translateX(34px) scale(.8); }
+}
+.coverageChartSection[data-waiting="true"] { position: relative; }
+.coverageChartSection[data-waiting="true"] canvas { visibility: hidden; }
+.coverageChartSection[data-waiting="true"]::after {
+  content: "Coverage begins after configuration";
+  position: absolute; inset: 0; display: grid; place-items: center;
+  color: #777; font-size: 10px; text-align: center;
+}
+.playbackDock #playBtn:disabled,
+.playbackDock #timelineSlider:disabled { opacity: .4; cursor: wait; }
+@media (prefers-reduced-motion: reduce) {
+  .configSatelliteDot { animation: none; }
+  .configSatelliteDot:nth-child(2) { background: #eaaa00; opacity: 1; }
+  .scenarioCardInfo { transition: none; }
+}
