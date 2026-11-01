@@ -40,7 +40,7 @@ function coverageWindowSeconds() {
   return (COVERAGE_HISTORY_LIMIT - 1) * scenarioTimeStepSeconds;
 }
 
-const GLOBAL_TESSELLATION_POINT_COUNT = 15000;
+const GLOBAL_TESSELLATION_POINT_COUNT = 50000;
 
 const COLOR_MIN = "#222222";
 const COLOR_AVG = "#eaaa00";
@@ -88,8 +88,9 @@ let deferredMapDrawTimer = null;
 let killRadiusKm = null;
 let interceptAltitudeKm = 200;
 let minElevationDeg = 0;
-let focusLatDeg = 35.0;
-let focusLonDeg = 103.0;
+// Point the first frame at the default threat while the run files load.
+let focusLatDeg = 40.03;
+let focusLonDeg = 125.93;
 
 let worldFeatures = [];
 let detailedWorldFeatures = [];
@@ -1072,7 +1073,8 @@ function coverageColor(count, maxCount) {
   return interpolateHexColor(COVERAGE_HIGH_COLOR, COVERAGE_TOP_COLOR, (t - 0.75) / 0.25);
 }
 
-function generateGlobalFibonacciCells(count = GLOBAL_TESSELLATION_POINT_COUNT) {
+function generateGlobalFibonacciCells(count = window.innerWidth <= 600
+  ? 15000 : GLOBAL_TESSELLATION_POINT_COUNT) {
   const cells = [];
   const goldenAngle = Math.PI * (3 - Math.sqrt(5));
 
@@ -1139,6 +1141,15 @@ function getUiBounds() {
 function getAvailableMapExtent() {
   const ui = getUiBounds();
   const margin = 22;
+
+  if (window.innerWidth <= 600) {
+    const bottom = document.body.classList.contains("uiCollapsed")
+      ? window.innerHeight - 122 : ui.top - 12;
+    return {
+      left: 14, top: 70, right: window.innerWidth - 14, bottom,
+      width: window.innerWidth - 28, height: Math.max(120, bottom - 70)
+    };
+  }
 
   return {
     left: ui.right + margin,
@@ -2004,9 +2015,11 @@ function draw2DMap() {
   }
   mapCtx.clip();
 
+  const colors = new Map();
   mapCells.forEach(cell => {
     const count = globalCoverageCounts[cell.targetIdx] || 0;
-    mapCtx.fillStyle = coverageColor(count, mapColorScaleMax);
+    if (!colors.has(count)) colors.set(count, coverageColor(count, mapColorScaleMax));
+    mapCtx.fillStyle = colors.get(count);
     mapCtx.fill(cell.path);
   });
 
@@ -2070,11 +2083,12 @@ function startProjectionMorph(snapshot, sourceProjection, destinationProjection,
   mapProjectionMorphActive = true;
   const dpr = window.devicePixelRatio || 1;
   const width = window.innerWidth, height = window.innerHeight;
+  const morphStride = Math.max(2, Math.ceil(globalCellLatLon.length / 8000));
   const cells = globalCellLatLon.map((cell, index) => ({
     source: sourceProjection([cell.lon, cell.lat]),
     destination: destinationProjection([cell.lon, cell.lat]),
     color: coverageColor(globalCoverageCounts[index] || 0, mapColorScaleMax)
-  })).filter((cell, index) => index % 2 === 0 &&
+  })).filter((cell, index) => index % morphStride === 0 &&
     cell.source?.every(Number.isFinite) && cell.destination?.every(Number.isFinite));
   const colorGroups = new Map();
   cells.forEach(cell => {
@@ -2182,7 +2196,9 @@ function setMapGeographicView(view) {
   updateMapControlLabels();
   draw2DMap();
   startProjectionMorph(snapshot, sourceProjection, mapProjection, oldMarkers,
-    view === "regional" ? () => void runScenarioMapIntro() : null);
+    view === "regional" ? () => {
+      [...mapSiteLayer.children].forEach(marker => { marker.dataset.darkBlip = "true"; });
+    } : null);
 }
 
 function setVisualizationMode(mode) {
@@ -3116,6 +3132,8 @@ async function loadPrincipalRun(run) {
   const regionChanged = activePrincipalRun?.region !== run.region;
   const geographicSwitch = hasCompletedInitialRun && regionChanged &&
     visualizationMode === "3d" && !idleActive && !restoringPresentation;
+  const initialSequence = !hasCompletedInitialRun && visualizationMode === "3d" &&
+    !idleActive && !restoringPresentation;
   const transitionFarDistance = GEOGRAPHIC_TRANSITION_DISTANCE;
   if (playbackBeforePrincipalLoad === null) playbackBeforePrincipalLoad = isPlaying;
   isPlaying = false;
@@ -3202,7 +3220,7 @@ async function loadPrincipalRun(run) {
     setStatus(`Loaded Principal Run ${run.name}. ${rows.length} satellites, ${displayedPlaneCount} displayed planes.`);
     document.dispatchEvent(new CustomEvent("principal-panel:run-loaded", {
       detail: { run, actualPlanes: actualPlaneCount, displayPlanes: displayedPlaneCount,
-        awaitingPopulation: geographicSwitch }
+        awaitingPopulation: geographicSwitch || initialSequence }
     }));
     if (geographicSwitch) {
       document.body.dataset.geographicTransitionStage = "rotate-globe";
@@ -3221,6 +3239,11 @@ async function loadPrincipalRun(run) {
       siteMarkerGroup.visible = true;
       document.body.dataset.geographicTransitionStage = "geographic-intro";
       void runGeographicIntro(true);
+    }
+    else if (initialSequence) {
+      launchSitesActivated = true;
+      siteMarkerGroup.visible = true;
+      void runGeographicIntro(false);
     }
     else if (regionChanged && visualizationMode === "2d" && !restoringPresentation) void runScenarioMapIntro();
     else updateGlobeSiteDetail();
@@ -3363,6 +3386,13 @@ function apply3DViewOffset() {
     return;
   }
 
+  if (width <= 600) {
+    camera.zoom = 1;
+    camera.setViewOffset(width, height, 0, Math.round(height * .15), width, height);
+    camera.updateProjectionMatrix();
+    return;
+  }
+
   const ui = getUiBounds();
 
   const openAreaLeft = (idleActive || document.body.classList.contains("uiCollapsed")) ? 0 : Math.max(0, ui.right);
@@ -3390,6 +3420,17 @@ function clear3DViewOffset() {
 
 function setFullEarthView() {
   const focus = getPresentedFocusVector(1);
+
+  if (window.innerWidth <= 600) {
+    camera.position.copy(focus.clone().multiplyScalar(4.8));
+    camera.position.y += .4;
+    camera.up.set(0, 1, 0);
+    controls.target.set(0, -.08, 0);
+    controls.update();
+    apply3DViewOffset();
+    isHorizonView = false;
+    return;
+  }
 
   // Slightly enlarge the initial globe and bias the framing upward so the
   // open visualization area has more visual presence beneath the controls.
@@ -4085,7 +4126,7 @@ function advanceEarthPresentationToSimulationTime() {
   const geographicStage = document.body.dataset.geographicTransitionStage;
   const orientationTransition = (geographicIntroActive && geographicStage !== "orbit-reveal") ||
     (Boolean(geographicStage) && geographicStage !== "orbit-reveal") ||
-    ["enter-camera", "exit-camera", "rotate"].includes(stage);
+    ["enter-camera", "rotate"].includes(stage);
   const carouselEarthCanSpin = !idleActive || ["reveal-satellites", "dwell",
     "depart-satellites", "depart-sites", "depart-fill", "depart-outline"].includes(stage);
   if (visualizationMode !== "3d" || !carouselInertialAttached ||
@@ -4490,7 +4531,7 @@ async function enterIdleMode(manual = false) {
 async function exitIdleMode() {
   if (!idleActive) return;
   idleActive = false;
-  isPlaying = false;
+  isPlaying = true;
   manualIdleGraceUntil = 0;
   idleGeneration += 1;
   window.clearTimeout(idleCarouselTimer);
@@ -4501,8 +4542,9 @@ async function exitIdleMode() {
   suppressScenarioCameraReframe = false;
   idleSession = null;
   if (prior?.viewMode === "3d") {
-    // Keep the Earth and constellation fixed while only the camera returns.
-    isPlaying = false;
+    // Keep the constellation playing while the camera returns; Earth and
+    // displayed satellites continue on the same inertial timebase.
+    isPlaying = true;
     siteMarkerGroup.visible = launchSitesActivated;
     globeSiteEntries.forEach(entry => { entry.darkPulseStartedAtMs = performance.now(); });
     carouselPulseStartMs = null;
@@ -4523,7 +4565,7 @@ async function exitIdleMode() {
   document.body.classList.remove("idleMode");
   document.getElementById("ui").removeAttribute("aria-hidden");
   restoringPresentation = false;
-  isPlaying = prior?.playing ?? true;
+  isPlaying = true;
   currentPlaybackMultiplier = playbackMultiplier;
   updatePlaybackButton();
   updateSceneForTime(false, false);

@@ -1,4 +1,5 @@
-/* Project glossary annotations; definitions live in glossary-data.json. */
+/* Project glossary annotations; the published sheet is read on every refresh. */
+import { parseCsvTable } from "./scenario-detail.js?v=eci-refinement-1";
 const panel = document.getElementById("ui");
 const popover = document.createElement("div");
 popover.id = "glossaryPopover";
@@ -134,12 +135,45 @@ function annotatePanel() {
   nodes.forEach(annotateTextNode);
 }
 
+function parseLiveGlossary(csvText, project) {
+  const [header, ...records] = parseCsvTable(csvText);
+  if (!header?.includes("Project") || !header.includes("Term") ||
+      !header.includes("Definition")) throw new Error("Glossary sheet columns are missing.");
+  const entries = records.map(record => Object.fromEntries(
+    header.map((key, index) => [key, String(record[index] || "").trim()])
+  )).filter(row => row.Project === project && row.Term && row.Definition)
+    .map(row => ({
+      term: row.Term,
+      acronym: row.Acronym || "",
+      definition: row.Definition,
+      sources: Array.from({ length: 5 }, (_, index) => {
+        const label = row[`Source ${index + 1} display`] || "";
+        const url = row[`Source ${index + 1} link`] || "";
+        return label || url ? { label: label || url, url: url.startsWith("https://") ? url : "" } : null;
+      }).filter(Boolean)
+    }));
+  if (!entries.length) throw new Error("The live glossary has no project entries.");
+  return entries;
+}
+
 async function initializeGlossary() {
   const response = await fetch("glossary-data.json", { cache: "no-store" });
   if (!response.ok) throw new Error("Glossary data could not be loaded.");
   const data = await response.json();
+  let entries = data.entries;
+  try {
+    const live = await fetch(`${data.sourceUrl}&refresh=${Date.now()}`, { cache: "no-store" });
+    if (!live.ok) throw new Error(`Live glossary returned ${live.status}.`);
+    entries = parseLiveGlossary(await live.text(), data.project);
+    document.body.dataset.glossarySource = "live";
+  } catch (error) {
+    console.warn("Live glossary unavailable; using the published snapshot.", error);
+    document.body.dataset.glossarySource = "snapshot";
+  }
+  document.body.dataset.glossaryEntries = String(entries.length);
   const variants = [];
-  data.entries.forEach(entry => {
+  matchEntries.clear();
+  entries.forEach(entry => {
     const labels = [entry.term, ...entry.acronym.split(";").map(value => value.trim())].filter(Boolean);
     labels.forEach(label => {
       matchEntries.set(label.toLocaleLowerCase(), entry);
