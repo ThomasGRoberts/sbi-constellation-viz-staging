@@ -40,7 +40,7 @@ function coverageWindowSeconds() {
   return (COVERAGE_HISTORY_LIMIT - 1) * scenarioTimeStepSeconds;
 }
 
-const GLOBAL_TESSELLATION_POINT_COUNT = 50000;
+const GLOBAL_TESSELLATION_POINT_COUNT = 25000;
 
 const COLOR_MIN = "#222222";
 const COLOR_AVG = "#eaaa00";
@@ -509,13 +509,19 @@ function satelliteCoversPoint(satPos, pointPos, killRadiusSceneSq) {
 function buildGlobalCellSpatialIndex() {
   if (!killRadiusKm || !globalCellPositions.length) return null;
   const cellSize = Math.max(0.02, killRadiusKm / EARTH_RADIUS_KM);
+  const offset = Math.ceil(2 / cellSize) + 4;
+  const width = offset * 2 + 1;
+  const plane = width * width;
   const buckets = new Map();
   globalCellPositions.forEach((point, idx) => {
-    const key = `${Math.floor(point.x / cellSize)},${Math.floor(point.y / cellSize)},${Math.floor(point.z / cellSize)}`;
+    const key = (Math.floor(point.x / cellSize) + offset) * plane +
+      (Math.floor(point.y / cellSize) + offset) * width +
+      Math.floor(point.z / cellSize) + offset;
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key).push(idx);
   });
-  return { buckets, cellSize };
+  return { buckets, cellSize, offset, width, plane,
+    targetRadiusSq: globalCellPositions[0].lengthSq() };
 }
 
 function updateSatellitePointColors(activeSatellites) {
@@ -581,20 +587,35 @@ function computeCountsForPositions(positions, timeSeconds = simulationSeconds, p
   const killRadiusSceneSq = killRadiusScene * killRadiusScene;
 
   if (positions === globalCellPositions && globalCellSpatialIndex) {
-    const { buckets, cellSize } = globalCellSpatialIndex;
+    const { buckets, cellSize, offset, width, plane, targetRadiusSq } = globalCellSpatialIndex;
+    const minSinElevation = Math.sin(degToRad(minElevationDeg));
+    const minSinElevationSq = minSinElevation * minSinElevation;
     satObjects.forEach(obj => {
       const satPos = positionResolver(obj.row, timeSeconds);
+      const sx = satPos.x, sy = satPos.y, sz = satPos.z;
       const bx = Math.floor(satPos.x / cellSize);
       const by = Math.floor(satPos.y / cellSize);
       const bz = Math.floor(satPos.z / cellSize);
       for (let dx = -1; dx <= 1; dx += 1) {
         for (let dy = -1; dy <= 1; dy += 1) {
           for (let dz = -1; dz <= 1; dz += 1) {
-            const candidates = buckets.get(`${bx + dx},${by + dy},${bz + dz}`);
+            const key = (bx + dx + offset) * plane +
+              (by + dy + offset) * width + bz + dz + offset;
+            const candidates = buckets.get(key);
             if (!candidates) continue;
-            candidates.forEach(idx => {
-              if (satelliteCoversPoint(satPos, positions[idx], killRadiusSceneSq)) counts[idx] += 1;
-            });
+            for (const idx of candidates) {
+              const point = positions[idx];
+              const rx = sx - point.x, ry = sy - point.y, rz = sz - point.z;
+              const distanceSq = rx * rx + ry * ry + rz * rz;
+              if (distanceSq > killRadiusSceneSq || distanceSq <= 0) continue;
+              const rise = rx * point.x + ry * point.y + rz * point.z;
+              if (minSinElevation >= 0) {
+                if (rise >= 0 && rise * rise >= minSinElevationSq * distanceSq * targetRadiusSq)
+                  counts[idx] += 1;
+              } else if (rise >= 0 || rise * rise <= minSinElevationSq * distanceSq * targetRadiusSq) {
+                counts[idx] += 1;
+              }
+            }
           }
         }
       }
@@ -2976,6 +2997,7 @@ async function loadScenarioJson(csvPath, preloadedData = null) {
   if (globalCellLatLon.length === 0) {
     globalCellLatLon = generateGlobalFibonacciCells();
   }
+  document.body.dataset.mapCellCount = String(globalCellLatLon.length);
 
   globalCellPositions = globalCellLatLon.map(cell =>
     latLonToVector3(cell.lat, cell.lon, targetRadius)
@@ -3201,6 +3223,14 @@ async function loadPrincipalRun(run) {
     countrySelect.value = run.region;
     resetMapView();
     clearConstellation();
+    // A denser map is crisp for normal constellations. Large solutions
+    // already require much more satellite analysis per playback tick, so use
+    // the original density to keep their 2D view responsive.
+    const desiredMapCells = window.innerWidth <= 600 || rows.length > 10000
+      ? 15000 : GLOBAL_TESSELLATION_POINT_COUNT;
+    if (globalCellLatLon.length !== desiredMapCells) {
+      globalCellLatLon = generateGlobalFibonacciCells(desiredMapCells);
+    }
     await loadScenarioJson(run.csvPath, resultData);
     renderConstellation(rows);
     const displayedPlaneCount = trajectoryGroup.children.filter(child => child.visible).length;

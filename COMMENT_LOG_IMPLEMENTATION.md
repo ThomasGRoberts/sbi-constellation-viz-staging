@@ -21,7 +21,7 @@ Source: [published team comment log](https://docs.google.com/spreadsheets/d/e/2P
 | 19 | Playback controls and chart wait until the constellation reveal finishes. |
 | 20 | Initial load runs the full North Korea outline, launch-site, and satellite population sequence from a North Korea camera focus. |
 | 21 | Glossary terms refresh from the live published sheet on each page load; the bundled snapshot is a fallback and was refreshed. |
-| 22 | The desktop 2D map uses 50,000 tessellation cells, with cached coverage colors and an 8,000-cell projection transition sample. Phone screens use 15,000 cells for responsiveness. |
+| 22 | Tested 50,000 tessellation cells. At that density, the 21,986-satellite China run had 133 ms frame gaps even after coverage optimization, and an ordinary 2,116-satellite run had 66 ms gaps. The retained desktop density is 25,000 cells for constellations with at most 10,000 satellites; larger solutions and phone screens use 15,000. Coverage lookup uses a numeric spatial index and scalar visibility math; map colors are cached per count, and projection transitions sample at most 8,000 cells. |
 | 23 | The 2D zoom-in button morphs to the regional view and reveals sites without fading out coverage or rerunning the intro. |
 | 7 | Added a portrait phone layout with a cropped, tilted globe, a scrollable lower control panel, a compact playback dock, and view controls at upper right. |
 
